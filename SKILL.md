@@ -1,3 +1,17 @@
+---
+name: taskflow
+description: Structured project/task management for OpenClaw agents — markdown-first authoring, SQLite-backed querying, bidirectional sync, CLI, Apple Notes integration.
+metadata:
+  {
+    "openclaw":
+      {
+        "emoji": "📋",
+        "os": ["darwin", "linux"],
+        "requires": { "bins": ["node"], "env": ["OPENCLAW_WORKSPACE"] },
+      },
+  }
+---
+
 # TaskFlow — Agent Skill Reference
 
 TaskFlow gives any OpenClaw agent a **structured project/task/plan system** with markdown-first authoring, SQLite-backed querying, and bidirectional sync.
@@ -21,8 +35,8 @@ All TaskFlow scripts and the CLI resolve paths from this variable. Without it, t
 ### 2. Link the CLI
 
 ```bash
-ln -sf /path/to/taskflow/bin/taskflow /opt/homebrew/bin/taskflow  # macOS (Apple Silicon)
-# or: ln -sf /path/to/taskflow/bin/taskflow /usr/local/bin/taskflow
+ln -sf {baseDir}/bin/taskflow /opt/homebrew/bin/taskflow  # macOS (Apple Silicon)
+# or: ln -sf {baseDir}/bin/taskflow /usr/local/bin/taskflow
 ```
 
 ### 3. Run the setup wizard
