@@ -15,8 +15,8 @@ Structured project and task management for OpenClaw agents — markdown-first, S
 export OPENCLAW_WORKSPACE="/path/to/your/.openclaw/workspace"
 
 # 2. Link the CLI
-ln -sf "$(pwd)/bin/taskflow" /opt/homebrew/bin/taskflow   # macOS
-# ln -sf "$(pwd)/bin/taskflow" /usr/local/bin/taskflow    # Linux
+ln -sf "$(pwd)/scripts/taskflow-cli.mjs" /opt/homebrew/bin/taskflow   # macOS
+# ln -sf "$(pwd)/scripts/taskflow-cli.mjs" /usr/local/bin/taskflow    # Linux
 
 # 3. Run setup
 taskflow setup

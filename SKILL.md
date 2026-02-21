@@ -35,8 +35,8 @@ All TaskFlow scripts and the CLI resolve paths from this variable. Without it, t
 ### 2. Link the CLI
 
 ```bash
-ln -sf {baseDir}/bin/taskflow /opt/homebrew/bin/taskflow  # macOS (Apple Silicon)
-# or: ln -sf {baseDir}/bin/taskflow /usr/local/bin/taskflow
+ln -sf {baseDir}/scripts/taskflow-cli.mjs /opt/homebrew/bin/taskflow  # macOS (Apple Silicon)
+# or: ln -sf {baseDir}/scripts/taskflow-cli.mjs /usr/local/bin/taskflow
 ```
 
 ### 3. Run the setup wizard
@@ -121,17 +121,16 @@ Passing `--name` skips all interactive prompts (LaunchAgent install is also skip
 └── taskflow/
     ├── SKILL.md                     # This file
     ├── scripts/
+    │   ├── taskflow-cli.mjs         # CLI entry point (symlink target)
     │   ├── task-sync.mjs            # Bidirectional markdown ↔ SQLite sync
     │   ├── init-db.mjs              # Bootstrap SQLite schema (idempotent)
     │   ├── export-projects-overview.mjs  # JSON export of project/task state
-    │   └── apple-notes-export.mjs  # Optional: project state → Apple Notes (macOS only)
-    ├── bin/
-    │   └── taskflow                 # CLI entry point
+    │   └── apple-notes-export.mjs   # Optional: project state → Apple Notes (macOS only)
     ├── templates/                   # Starter files for new projects
     ├── schema/
     │   └── taskflow.sql             # Full DDL
     └── launchagents/
-        └── com.taskflow.sync.plist.tmpl  # Periodic sync (macOS)
+        └── com.taskflow.sync.plist.xml  # Periodic sync (macOS)
 <workspace>/
 └── taskflow.config.json                 # Apple Notes config (auto-created on first notes run)
 ```
@@ -156,7 +155,7 @@ Follow this full checklist when creating a new project:
 
 ### 2. Create the task file
 
-Copy `taskflow/templates/tasks.md.tmpl` → `tasks/<slug>-tasks.md` and update the project name in the heading.
+Copy `taskflow/templates/tasks-template.md` → `tasks/<slug>-tasks.md` and update the project name in the heading.
 
 The file **must** contain these five section headers in this order:
 
@@ -172,7 +171,7 @@ The file **must** contain these five section headers in this order:
 
 ### 3. Optionally create a plan file
 
-Copy `taskflow/templates/plan.md.tmpl` → `plans/<slug>-plan.md` for architecture docs, design decisions, and phased roadmaps. Plan files are **not** synced to SQLite — they are reference-only for the agent.
+Copy `taskflow/templates/plan-template.md` → `plans/<slug>-plan.md` for architecture docs, design decisions, and phased roadmaps. Plan files are **not** synced to SQLite — they are reference-only for the agent.
 
 ### 4. DB row (auto-created on first sync)
 
@@ -427,7 +426,7 @@ The LaunchAgent (macOS) runs `task-sync.mjs files-to-db` every **60 seconds** in
 
 To install (macOS):
 
-1. Copy `taskflow/launchagents/com.taskflow.sync.plist.tmpl` → `~/Library/LaunchAgents/com.taskflow.sync.plist`
+1. Copy `taskflow/launchagents/com.taskflow.sync.plist.xml` → `~/Library/LaunchAgents/com.taskflow.sync.plist`
 2. Replace `{{workspace}}` with the absolute path to your workspace
 3. `launchctl load ~/Library/LaunchAgents/com.taskflow.sync.plist`
 

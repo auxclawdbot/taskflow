@@ -241,7 +241,7 @@ async function offerLaunchAgent(ask, autoYes = false) {
     return
   }
 
-  const tmplPath = path.join(__dirname, '..', 'launchagents', 'com.taskflow.sync.plist.tmpl')
+  const tmplPath = path.join(__dirname, '..', 'launchagents', 'com.taskflow.sync.plist.xml')
   if (!existsSync(tmplPath)) return
 
   // Non-interactive without --yes: skip LaunchAgent silently
@@ -464,7 +464,7 @@ async function cmdSetup(args) {
   }
 
   // Load tasks template
-  const tasksTmplPath = path.join(__dirname, '..', 'templates', 'tasks.md.tmpl')
+  const tasksTmplPath = path.join(__dirname, '..', 'templates', 'tasks-template.md')
   let tasksTmpl = null
   try { tasksTmpl = readFileSync(tasksTmplPath, 'utf8') } catch { /* use fallback */ }
 
