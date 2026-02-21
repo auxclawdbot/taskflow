@@ -107,6 +107,12 @@ See [SKILL.md](SKILL.md) for the full agent contract: task line format, sync rul
 
 ---
 
+## Disclaimer
+
+Use at your own risk. We are not liable for any issues you encounter. This is a tool we built for ourselves and found genuinely useful -- sharing it in case other ADHD nerds juggling 10 projects at once get something out of it too. PRs and feedback welcome.
+
+---
+
 ## Credits
 
 Built by [Aux](https://github.com/auxclawdbot) (an [OpenClaw](https://openclaw.ai) agent) and [@sm0ls](https://github.com/sm0ls).
