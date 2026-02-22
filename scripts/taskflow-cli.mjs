@@ -10,6 +10,7 @@
  *   taskflow init                Bootstrap SQLite schema
  *   taskflow install-daemon      Install periodic-sync daemon (LaunchAgent on macOS, systemd on Linux)
  *   taskflow add <project> <title> Create a new task in markdown (source of truth)
+ *   taskflow list <project>      List tasks for a project (current tasks by default)
  *   taskflow help                Show this help
  */
 
@@ -847,6 +848,221 @@ async function cmdAdd(rawArgs) {
   }
 }
 
+// --- list --------------------------------------------------------------------
+function parseListArgs(rawArgs) {
+  const out = {
+    project: null,
+    all: false,
+    status: null,
+    priority: null,
+    owner: null,
+    json: false,
+    limit: null,
+  }
+
+  const rest = [...rawArgs]
+  if (!rest.length) return out
+
+  if (rest[0] && !rest[0].startsWith('--')) {
+    out.project = (rest.shift() || '').trim() || null
+  }
+
+  while (rest.length) {
+    const tok = rest.shift()
+    if (tok === '--all') out.all = true
+    else if (tok === '--status') out.status = (rest.shift() || '').trim()
+    else if (tok === '--priority') out.priority = (rest.shift() || '').trim()
+    else if (tok === '--owner') out.owner = (rest.shift() || '').trim()
+    else if (tok === '--project') out.project = (rest.shift() || '').trim() || null
+    else if (tok === '--json') out.json = true
+    else if (tok === '--limit') {
+      const n = Number(rest.shift())
+      if (!Number.isFinite(n) || n <= 0) {
+        console.error(`${c.red}✗${c.reset} --limit must be a positive number`)
+        process.exit(1)
+      }
+      out.limit = Math.floor(n)
+    } else {
+      console.error(`${c.red}✗${c.reset} Unknown flag for list: ${tok}`)
+      process.exit(1)
+    }
+  }
+
+  return out
+}
+
+function splitCsv(input) {
+  return (input || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean)
+}
+
+function firstNoteLine(notes) {
+  if (!notes) return null
+  const line = String(notes).split(/\r?\n/).map(s => s.trim()).find(Boolean)
+  return line || null
+}
+
+function formatTaskLine(task) {
+  const owner = task.owner_model ? ` [${task.owner_model}]` : ''
+  const note = task.first_note ? `\n    ${c.dim}note:${c.reset} ${task.first_note}` : ''
+  return `  - (${task.id}) [${task.priority}]${owner} ${task.title}${note}`
+}
+
+function resolveProject(db, projectRef) {
+  const raw = (projectRef || '').trim()
+  if (!raw) return { project: null }
+
+  const exactId = db.prepare('SELECT id, name FROM projects WHERE id = ?').get(raw.toLowerCase())
+  if (exactId) return { project: exactId }
+
+  const all = db.prepare('SELECT id, name FROM projects ORDER BY id').all()
+  const ref = raw.toLowerCase()
+
+  const exactName = all.filter(p => String(p.name || '').toLowerCase() === ref)
+  if (exactName.length === 1) return { project: exactName[0] }
+
+  const starts = all.filter(p => p.id.toLowerCase().startsWith(ref) || String(p.name || '').toLowerCase().startsWith(ref))
+  if (starts.length === 1) return { project: starts[0] }
+
+  const contains = all.filter(p => p.id.toLowerCase().includes(ref) || String(p.name || '').toLowerCase().includes(ref))
+  if (contains.length === 1) return { project: contains[0] }
+
+  const candidates = starts.length ? starts : contains
+  if (candidates.length > 1) return { project: null, ambiguous: true, candidates }
+
+  return { project: null }
+}
+
+function cmdList(rawArgs) {
+  const args = parseListArgs(rawArgs)
+  const allowedStatus = ['in_progress', 'pending_validation', 'blocked', 'backlog', 'done']
+  const allowedPriority = ['P0', 'P1', 'P2', 'P3', 'P9']
+  const statusOrder = ['in_progress', 'pending_validation', 'blocked', 'backlog', 'done']
+  const statusLabel = {
+    in_progress: 'In Progress',
+    pending_validation: 'Pending Validation',
+    blocked: 'Blocked',
+    backlog: 'Backlog',
+    done: 'Done',
+  }
+  const priorityRank = { P0: 0, P1: 1, P2: 2, P3: 3, P9: 4 }
+
+  if (!args.project) {
+    console.error(`${c.red}✗${c.reset} Usage: taskflow list <project> [--project <slug|name>] [--all] [--status in_progress,backlog] [--priority P1,P2] [--owner codex] [--json] [--limit N]`)
+    process.exit(1)
+  }
+
+  if (!existsSync(dbPath)) {
+    console.error(`${c.red}✗${c.reset} DB not found at: ${dbPath}`)
+    console.error(`  Run ${c.bold}taskflow init${c.reset} and ${c.bold}taskflow sync files-to-db${c.reset} first.`)
+    process.exit(1)
+  }
+
+  const selectedStatuses = args.status ? splitCsv(args.status).map(s => s.toLowerCase()) : null
+  if (selectedStatuses) {
+    const invalid = selectedStatuses.filter(s => !allowedStatus.includes(s))
+    if (invalid.length) {
+      console.error(`${c.red}✗${c.reset} Invalid --status value(s): ${invalid.join(', ')}`)
+      console.error(`  Allowed: ${allowedStatus.join(', ')}`)
+      process.exit(1)
+    }
+  }
+
+  const selectedPriorities = args.priority ? splitCsv(args.priority).map(p => p.toUpperCase()) : null
+  if (selectedPriorities) {
+    const invalid = selectedPriorities.filter(p => !allowedPriority.includes(p))
+    if (invalid.length) {
+      console.error(`${c.red}✗${c.reset} Invalid --priority value(s): ${invalid.join(', ')}`)
+      console.error(`  Allowed: ${allowedPriority.join(', ')}`)
+      process.exit(1)
+    }
+  }
+
+  const db = new DatabaseSync(dbPath)
+  db.exec('PRAGMA foreign_keys = ON')
+
+  const resolved = resolveProject(db, args.project)
+  if (!resolved.project) {
+    if (resolved.ambiguous) {
+      console.error(`${c.red}✗${c.reset} Ambiguous project reference '${args.project}'.`)
+      console.error(`  Matches: ${resolved.candidates.map(p => `${p.id} (${p.name})`).join(', ')}`)
+      process.exit(1)
+    }
+    console.error(`${c.red}✗${c.reset} Unknown project '${args.project}' in DB.`)
+    console.error(`  Run ${c.bold}taskflow sync files-to-db${c.reset} if it exists in PROJECTS.md.`)
+    process.exit(1)
+  }
+  const project = resolved.project
+
+  const rows = db.prepare(`
+    SELECT id, project_id, title, status, priority, owner_model, notes
+    FROM tasks_v2
+    WHERE project_id = ?
+  `).all(project.id)
+
+  const defaultStatuses = ['in_progress', 'pending_validation', 'blocked', 'backlog']
+  const wantedStatuses = selectedStatuses || (args.all ? [...statusOrder] : defaultStatuses)
+
+  let filtered = rows
+    .filter(r => wantedStatuses.includes(r.status))
+    .filter(r => !selectedPriorities || selectedPriorities.includes(r.priority))
+    .filter(r => !args.owner || (r.owner_model || '').toLowerCase() === args.owner.toLowerCase())
+    .map(r => ({ ...r, first_note: firstNoteLine(r.notes) }))
+
+  filtered.sort((a, b) => {
+    const s = statusOrder.indexOf(a.status) - statusOrder.indexOf(b.status)
+    if (s !== 0) return s
+    const p = (priorityRank[a.priority] ?? 999) - (priorityRank[b.priority] ?? 999)
+    if (p !== 0) return p
+    return a.id.localeCompare(b.id)
+  })
+
+  if (args.limit) filtered = filtered.slice(0, args.limit)
+
+  if (args.json) {
+    const grouped = {}
+    for (const s of statusOrder) grouped[s] = []
+    for (const row of filtered) grouped[row.status].push(row)
+
+    console.log(JSON.stringify({
+      project: { id: project.id, name: project.name },
+      filters: {
+        all: args.all,
+        status: wantedStatuses,
+        priority: selectedPriorities,
+        owner: args.owner || null,
+        limit: args.limit || null,
+      },
+      total: filtered.length,
+      tasks: filtered,
+      grouped,
+    }, null, 2))
+    return
+  }
+
+  console.log()
+  console.log(`${c.bold}${project.name}${c.reset} ${c.gray}(${project.id})${c.reset}`)
+  console.log(`${c.dim}Showing ${filtered.length} task(s)${c.reset}`)
+
+  if (!filtered.length) {
+    console.log(`${c.dim}No matching tasks.${c.reset}`)
+    console.log()
+    return
+  }
+
+  for (const status of statusOrder) {
+    const bucket = filtered.filter(r => r.status === status)
+    if (!bucket.length) continue
+    console.log()
+    console.log(`${c.bold}${statusLabel[status]}${c.reset} ${c.gray}(${bucket.length})${c.reset}`)
+    for (const task of bucket) console.log(formatTaskLine(task))
+  }
+
+  console.log()
+}
+
 // --- notes -------------------------------------------------------------------
 async function cmdNotes() {
   const notesScript = path.join(SCRIPTS, 'apple-notes-export.mjs')
@@ -901,6 +1117,15 @@ ${c.bold}COMMANDS${c.reset}
     ${c.dim}--dry-run${c.reset}               Show what would be written without editing files
     ${c.dim}--sync${c.reset}                  Run files-to-db sync after write
 
+  ${c.cyan}list${c.reset} <project>            List tasks for one project (current tasks by default).
+    ${c.dim}--project <slug|name>${c.reset}   Alternate project selector flag (supports fuzzy match)
+    ${c.dim}--all${c.reset}                   Include done tasks
+    ${c.dim}--status <csv>${c.reset}          Filter statuses (e.g. in_progress,backlog)
+    ${c.dim}--priority <csv>${c.reset}        Filter priorities (e.g. P1,P2)
+    ${c.dim}--owner <tag>${c.reset}           Filter by exact owner/model tag
+    ${c.dim}--json${c.reset}                  Emit machine-readable JSON output
+    ${c.dim}--limit <n>${c.reset}             Limit total tasks returned after sorting
+
   ${c.cyan}notes${c.reset}                     Push current project status to Apple Notes (macOS only).
                             Creates a new note on first run; edits in-place on subsequent
                             runs (preserves any share link). Note ID is saved to
@@ -922,6 +1147,9 @@ ${c.bold}EXAMPLES${c.reset}
   taskflow sync check && echo "in sync"
   taskflow add dashboard "Ship calendar API retry logic" --priority P1 --owner codex
   taskflow add taskflow "Document parser edge case" --status blocked --note "Waiting on repro"
+  taskflow list taskflow
+  taskflow list --project "TaskFlow" --all
+  taskflow list task --status backlog,pending_validation --json
   taskflow notes
 `)
 }
@@ -956,6 +1184,10 @@ switch (cmd) {
 
   case 'add':
     cmdAdd(args)
+    break
+
+  case 'list':
+    cmdList(args)
     break
 
   case 'notes':

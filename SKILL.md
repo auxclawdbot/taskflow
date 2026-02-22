@@ -485,6 +485,11 @@ taskflow status
 # Add a task in markdown with automatic next ID
 taskflow add taskflow "Implement quick add command" --priority P1 --owner codex
 
+# List current tasks for a project (excludes done by default)
+taskflow list taskflow
+taskflow list --project "TaskFlow" --all
+taskflow list task --status backlog,pending_validation --json
+
 # JSON export of full project/task state (for dashboards, integrations)
 node taskflow/scripts/export-projects-overview.mjs
 

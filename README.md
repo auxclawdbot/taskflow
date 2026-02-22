@@ -37,7 +37,7 @@ taskflow setup --name "My Project" --desc "What it does"
 - **Markdown-first** — `PROJECTS.md` and `tasks/<slug>-tasks.md` are the source of truth; edit them directly in any editor or agent session
 - **SQLite-backed** — bidirectional sync keeps a derived index for fast querying, dashboards, and exports
 - **Bidirectional sync** — `files-to-db` and `db-to-files` modes; check for drift with `sync check`
-- **CLI** — `taskflow status`, `taskflow add`, `taskflow export`, `taskflow sync`, `taskflow setup`
+- **CLI** — `taskflow status`, `taskflow add`, `taskflow list`, `taskflow export`, `taskflow sync`, `taskflow setup`
 - **JSON export** — full project/task snapshot to stdout, ready for dashboards and integrations
 - **LaunchAgent (macOS)** — automatic 60s background sync via `launchctl`; Linux cron instructions included
 - **Zero dependencies** — pure Node.js, uses the built-in `node:sqlite` module (no npm install)
@@ -56,6 +56,8 @@ taskflow sync db-to-files    Regenerate markdown from DB state
 taskflow sync check          Detect drift (exit 1 if mismatch — good for CI)
 taskflow export              JSON snapshot to stdout
 taskflow init                Bootstrap or re-bootstrap the SQLite schema
+taskflow add <project> ...   Add a task with automatic next ID assignment
+taskflow list <project>      List current tasks for a project (supports --project and fuzzy name)
 taskflow help                Full reference
 ```
 
