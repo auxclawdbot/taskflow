@@ -51,20 +51,16 @@ taskflow setup --name "My Project" --desc "What it does"
 ```
 taskflow setup               Interactive first-run onboarding
 taskflow status              All projects with task counts and progress bars
-taskflow add <project> "title"  Add a task to markdown with auto ID generation
 taskflow sync files-to-db    Sync markdown → SQLite (markdown is authoritative)
 taskflow sync db-to-files    Regenerate markdown from DB state
 taskflow sync check          Detect drift (exit 1 if mismatch — good for CI)
 taskflow export              JSON snapshot to stdout
 taskflow init                Bootstrap or re-bootstrap the SQLite schema
-taskflow add taskflow "Ship add command" --priority P1 --owner codex
 taskflow help                Full reference
 ```
 
 ![taskflow help](examples/cli-help.png)
 
-
-**`taskflow add` flags:** `--priority P0|P1|P2|P3|P9`, `--owner <tag>`, `--status backlog|in_progress|pending_validation|blocked|done`, `--note "..."`, `--dry-run`, `--json`, `--sync`.
 
 ---
 
