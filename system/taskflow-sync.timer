@@ -1,0 +1,17 @@
+[Unit]
+Description=TaskFlow Periodic Sync Timer — fires every 60 seconds
+Documentation=file://{{workspace}}/taskflow/SKILL.md
+
+[Timer]
+# Run 5 seconds after the unit is loaded (initial delay, mirrors LaunchAgent RunAtLoad)
+OnActiveSec=5s
+# Then repeat every 60 seconds (matches macOS LaunchAgent StartInterval=60)
+OnUnitActiveSec=60s
+# Accuracy: allow up to 1s slippage to improve battery / scheduling efficiency
+AccuracySec=1s
+# Which service to activate
+Unit=taskflow-sync.service
+
+[Install]
+# Enable under the user session target so it starts automatically on login
+WantedBy=timers.target

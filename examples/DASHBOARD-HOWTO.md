@@ -81,3 +81,15 @@ See `export-schema.json` in this directory for the full JSON Schema.
 ---
 
 The data is already there. Build whatever feels right.
+
+## Validation Workflow Coupling (Projects Panel)
+
+In our dashboard, validation actions are wired directly into TaskFlow task state.
+`decision-store.ts` updates `taskflow.sqlite` (`tasks_v2`) when reviewers act in the
+Projects panel:
+
+- Confirm: `pending_validation` -> `done`
+- Reject: `pending_validation` -> `in_progress` (with reviewer feedback note)
+
+This is an integration pattern for dashboards, not a required part of TaskFlow core.
+TaskFlow remains UI-agnostic and does not assume any specific frontend store.

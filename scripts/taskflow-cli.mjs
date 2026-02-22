@@ -8,6 +8,8 @@
  *   taskflow export              JSON export to stdout
  *   taskflow sync <mode>         Sync markdown ↔ SQLite (modes: files-to-db | db-to-files | check)
  *   taskflow init                Bootstrap SQLite schema
+ *   taskflow install-daemon      Install periodic-sync daemon (LaunchAgent on macOS, systemd on Linux)
+ *   taskflow add <project> <title> Create a new task in markdown (source of truth)
  *   taskflow help                Show this help
  */
 
@@ -214,19 +216,25 @@ function printSetupSummary(createdFiles) {
 }
 
 /**
- * Offer to install (or describe) the periodic-sync LaunchAgent on macOS,
- * or print cron instructions on Linux.
+ * Offer to install (or describe) the periodic-sync daemon.
+ * macOS → LaunchAgent; Linux → systemd user timer.
  *
  * @param {Function|null} ask   - readline ask helper (null when non-interactive)
+ * @param {boolean} autoYes     - skip interactive prompt and accept
  */
 async function offerLaunchAgent(ask, autoYes = false) {
   const os = process.platform
 
+  if (os === 'linux') {
+    console.log()
+    console.log(`${c.dim}  Linux detected. Run ${c.cyan}taskflow install-daemon${c.dim} to install the systemd user timer.${c.reset}`)
+    return
+  }
+
   if (os !== 'darwin') {
     console.log()
-    console.log(`${c.dim}  Linux detected. For periodic auto-sync, add to crontab (crontab -e):${c.reset}`)
-    const syncScript = path.join(workspace, 'taskflow', 'scripts', 'task-sync.mjs')
-    console.log(`  ${c.gray}* * * * * OPENCLAW_WORKSPACE=${workspace} ${process.execPath} ${syncScript} files-to-db${c.reset}`)
+    console.log(`${c.dim}  Platform '${os}' not supported for automatic daemon install.${c.reset}`)
+    console.log(`  ${c.gray}Manual cron: * * * * * OPENCLAW_WORKSPACE=${workspace} ${process.execPath} ${path.join(workspace, 'taskflow', 'scripts', 'task-sync.mjs')} files-to-db${c.reset}`)
     return
   }
 
@@ -241,7 +249,7 @@ async function offerLaunchAgent(ask, autoYes = false) {
     return
   }
 
-  const tmplPath = path.join(__dirname, '..', 'launchagents', 'com.taskflow.sync.plist.xml')
+  const tmplPath = path.join(__dirname, '..', 'system', 'com.taskflow.sync.plist.xml')
   if (!existsSync(tmplPath)) return
 
   // Non-interactive without --yes: skip LaunchAgent silently
@@ -282,6 +290,132 @@ async function offerLaunchAgent(ask, autoYes = false) {
   } catch (e) {
     console.log(`  ${c.yellow}!${c.reset} LaunchAgent install failed: ${e.message}`)
   }
+}
+
+// --- install-daemon ----------------------------------------------------------
+/**
+ * Detect platform and install the appropriate sync daemon:
+ *   macOS  → ~/Library/LaunchAgents/com.taskflow.sync.plist  (launchctl)
+ *   Linux  → ~/.config/systemd/user/taskflow-sync.{service,timer}  (systemctl --user)
+ */
+async function cmdInstallDaemon() {
+  const os = process.platform
+  const { execSync } = await import('node:child_process')
+
+  console.log()
+  console.log(`${c.bold}${c.cyan}  TaskFlow — Install Sync Daemon${c.reset}`)
+  console.log(`${c.gray}  ${'─'.repeat(52)}${c.reset}`)
+  console.log(`  Platform:  ${c.bold}${os}${c.reset}`)
+  console.log(`  Workspace: ${c.bold}${workspace}${c.reset}`)
+  console.log()
+
+  // Ensure logs dir exists
+  const logsDir = path.join(workspace, 'logs')
+  if (!existsSync(logsDir)) {
+    mkdirSync(logsDir, { recursive: true })
+    console.log(`  ${c.green}created${c.reset} logs/`)
+  }
+
+  if (os === 'darwin') {
+    // ── macOS: LaunchAgent ───────────────────────────────────────────────
+    const plistDest = path.join(process.env.HOME || '', 'Library', 'LaunchAgents', 'com.taskflow.sync.plist')
+    const tmplPath  = path.join(__dirname, '..', 'system', 'com.taskflow.sync.plist.xml')
+
+    if (!existsSync(tmplPath)) {
+      console.error(`${c.red}✗${c.reset} Template not found: ${tmplPath}`)
+      process.exit(1)
+    }
+
+    if (existsSync(plistDest)) {
+      console.log(`  ${c.green}✓${c.reset} LaunchAgent already installed: ${plistDest}`)
+      console.log(`  ${c.dim}To reinstall, unload and remove it first:${c.reset}`)
+      console.log(`    launchctl unload "${plistDest}" && rm "${plistDest}"`)
+      return
+    }
+
+    const nodeBin = process.execPath
+    const plistContent = readFileSync(tmplPath, 'utf8')
+      .replace(/\{\{workspace\}\}/g, workspace)
+      .replace(/\{\{node\}\}/g, nodeBin)
+
+    writeFileSync(plistDest, plistContent, 'utf8')
+    console.log(`  ${c.green}created${c.reset}  ${plistDest}`)
+
+    try {
+      execSync(`launchctl load "${plistDest}"`, { stdio: 'pipe' })
+      console.log(`  ${c.green}loaded${c.reset}   com.taskflow.sync (syncs every 60s)`)
+    } catch (e) {
+      console.log(`  ${c.yellow}!${c.reset} Could not load automatically. Run:`)
+      console.log(`    launchctl load "${plistDest}"`)
+    }
+
+    console.log()
+    console.log(`  ${c.bold}Verify:${c.reset}  launchctl list | grep taskflow`)
+    console.log(`  ${c.bold}Logs:${c.reset}    ${workspace}/logs/taskflow-sync.{stdout,stderr}.log`)
+
+  } else if (os === 'linux') {
+    // ── Linux: systemd user timer ────────────────────────────────────────
+    const systemdDir  = path.join(process.env.HOME || '', '.config', 'systemd', 'user')
+    const svcSrc      = path.join(__dirname, '..', 'system', 'taskflow-sync.service')
+    const timerSrc    = path.join(__dirname, '..', 'system', 'taskflow-sync.timer')
+    const svcDest     = path.join(systemdDir, 'taskflow-sync.service')
+    const timerDest   = path.join(systemdDir, 'taskflow-sync.timer')
+
+    for (const src of [svcSrc, timerSrc]) {
+      if (!existsSync(src)) {
+        console.error(`${c.red}✗${c.reset} Template not found: ${src}`)
+        process.exit(1)
+      }
+    }
+
+    // Create systemd user dir if needed
+    if (!existsSync(systemdDir)) {
+      mkdirSync(systemdDir, { recursive: true })
+      console.log(`  ${c.green}created${c.reset} ${systemdDir}`)
+    }
+
+    const nodeBin = process.execPath
+
+    for (const [src, dest] of [[svcSrc, svcDest], [timerSrc, timerDest]]) {
+      const content = readFileSync(src, 'utf8')
+        .replace(/\{\{workspace\}\}/g, workspace)
+        .replace(/\{\{node\}\}/g, nodeBin)
+      writeFileSync(dest, content, 'utf8')
+      console.log(`  ${c.green}created${c.reset}  ${dest}`)
+    }
+
+    // Reload systemd user daemon and enable+start the timer
+    try {
+      execSync('systemctl --user daemon-reload', { stdio: 'pipe' })
+      console.log(`  ${c.green}reloaded${c.reset} systemd user daemon`)
+    } catch {
+      console.log(`  ${c.yellow}!${c.reset} daemon-reload failed (is systemd --user running?)`)
+    }
+
+    try {
+      execSync('systemctl --user enable --now taskflow-sync.timer', { stdio: 'pipe' })
+      console.log(`  ${c.green}enabled${c.reset}  taskflow-sync.timer (syncs every 60s)`)
+    } catch (e) {
+      console.log(`  ${c.yellow}!${c.reset} Could not enable timer automatically. Run:`)
+      console.log(`    systemctl --user daemon-reload`)
+      console.log(`    systemctl --user enable --now taskflow-sync.timer`)
+    }
+
+    console.log()
+    console.log(`  ${c.bold}Verify:${c.reset}  systemctl --user status taskflow-sync.timer`)
+    console.log(`  ${c.bold}Logs:${c.reset}    journalctl --user -u taskflow-sync.service`)
+    console.log(`           ${workspace}/logs/taskflow-sync.{stdout,stderr}.log`)
+
+  } else {
+    console.error(`${c.red}✗${c.reset} Platform '${os}' is not supported by install-daemon.`)
+    console.error(`  Supported platforms: darwin (macOS), linux`)
+    console.error()
+    console.error(`  Manual cron fallback:`)
+    console.error(`    * * * * * OPENCLAW_WORKSPACE=${workspace} ${process.execPath} ${path.join(workspace, 'taskflow', 'scripts', 'task-sync.mjs')} files-to-db`)
+    process.exit(1)
+  }
+
+  console.log()
 }
 
 /**
@@ -528,6 +662,191 @@ async function cmdSetup(args) {
   printSetupSummary(createdFiles)
 }
 
+
+// --- add ---------------------------------------------------------------------
+function parseAddArgs(rawArgs) {
+  const out = {
+    project: null,
+    title: null,
+    priority: 'P2',
+    owner: null,
+    status: 'backlog',
+    note: null,
+    json: false,
+    dryRun: false,
+    sync: false,
+  }
+
+  const rest = [...rawArgs]
+  if (!rest.length) return out
+
+  out.project = rest.shift() || null
+  if (rest[0] && !rest[0].startsWith('--')) {
+    out.title = (rest.shift() || '').trim()
+  }
+
+  while (rest.length) {
+    const tok = rest.shift()
+    if (!tok.startsWith('--')) {
+      if (!out.title) out.title = tok.trim()
+      else out.title += ` ${tok.trim()}`
+      continue
+    }
+
+    if (tok === '--priority') out.priority = (rest.shift() || '').trim()
+    else if (tok === '--owner') out.owner = (rest.shift() || '').trim()
+    else if (tok === '--status') out.status = (rest.shift() || '').trim()
+    else if (tok === '--note') out.note = (rest.shift() || '').trim()
+    else if (tok === '--json') out.json = true
+    else if (tok === '--dry-run') out.dryRun = true
+    else if (tok === '--sync') out.sync = true
+    else {
+      console.error(`${c.red}✗${c.reset} Unknown flag for add: ${tok}`)
+      process.exit(1)
+    }
+  }
+
+  return out
+}
+
+function escapeTaskTitle(title) {
+  return title.replace(/\s+/g, ' ').trim()
+}
+
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+async function cmdAdd(rawArgs) {
+  const args = parseAddArgs(rawArgs)
+  const allowedStatus = ['backlog', 'in_progress', 'pending_validation', 'blocked', 'done']
+  const allowedPriority = ['P0', 'P1', 'P2', 'P3', 'P9']
+  const sectionByStatus = {
+    in_progress: 'In Progress',
+    pending_validation: 'Pending Validation',
+    backlog: 'Backlog',
+    blocked: 'Blocked',
+    done: 'Done',
+  }
+
+  if (!args.project || !args.title) {
+    console.error(`${c.red}✗${c.reset} Usage: taskflow add <project> <title> [--priority P2] [--owner codex] [--status backlog|in_progress|pending_validation|blocked|done] [--note "..."] [--json] [--dry-run] [--sync]`)
+    process.exit(1)
+  }
+
+  const project = args.project.trim().toLowerCase()
+  const title = escapeTaskTitle(args.title)
+  const status = args.status.toLowerCase()
+  const priority = args.priority.toUpperCase()
+  const BANNED_HEADERS = /^(in progress|pending validation|backlog|blocked|done)$/i
+
+  if (!title || BANNED_HEADERS.test(title) || /\r|\n/.test(title)) {
+    console.error(`${c.red}✗${c.reset} Invalid task title.`)
+    process.exit(1)
+  }
+  if (!allowedStatus.includes(status)) {
+    console.error(`${c.red}✗${c.reset} Invalid --status '${args.status}'. Allowed: ${allowedStatus.join(', ')}`)
+    process.exit(1)
+  }
+  if (!allowedPriority.includes(priority)) {
+    console.error(`${c.red}✗${c.reset} Invalid --priority '${args.priority}'. Allowed: ${allowedPriority.join(', ')}`)
+    process.exit(1)
+  }
+  if (args.owner && !/^[A-Za-z0-9._-]{1,64}$/.test(args.owner)) {
+    console.error(`${c.red}✗${c.reset} Invalid --owner '${args.owner}'. Use letters, numbers, dot, underscore, dash.`)
+    process.exit(1)
+  }
+
+  const projectsFile = path.join(workspace, 'PROJECTS.md')
+  if (!existsSync(projectsFile)) {
+    console.error(`${c.red}✗${c.reset} PROJECTS.md not found at: ${projectsFile}`)
+    process.exit(1)
+  }
+  const projectsText = readFileSync(projectsFile, 'utf8')
+  const projectHeader = new RegExp(`^##\\s+${escapeRegex(project)}\\s*$`, 'm')
+  if (!projectHeader.test(projectsText)) {
+    console.error(`${c.red}✗${c.reset} Unknown project '${project}'. Add it to PROJECTS.md first.`)
+    process.exit(1)
+  }
+
+  const taskFile = path.join(workspace, 'tasks', `${project}-tasks.md`)
+  if (!existsSync(taskFile)) {
+    console.error(`${c.red}✗${c.reset} Task file not found: ${taskFile}`)
+    process.exit(1)
+  }
+
+  const original = readFileSync(taskFile, 'utf8')
+  const idRe = new RegExp(`\\(task:${escapeRegex(project)}-(\\d{1,})\\)`, 'g')
+  let m
+  let maxN = 0
+  while ((m = idRe.exec(original)) !== null) {
+    const n = Number(m[1])
+    if (Number.isFinite(n) && n > maxN) maxN = n
+  }
+  const nextId = `${project}-${String(maxN + 1).padStart(3, '0')}`
+
+  const sectionHeader = `## ${sectionByStatus[status]}`
+  const lines = original.split(/\n/)
+  const secIdx = lines.findIndex(l => l.trim() === sectionHeader)
+  if (secIdx < 0) {
+    console.error(`${c.red}✗${c.reset} Section '${sectionHeader}' not found in ${taskFile}`)
+    process.exit(1)
+  }
+
+  let insertIdx = lines.length
+  for (let i = secIdx + 1; i < lines.length; i++) {
+    if (/^##\s+/.test(lines[i])) {
+      insertIdx = i
+      break
+    }
+  }
+
+  const checkbox = status === 'done' ? '[x]' : '[ ]'
+  let taskLine = `- ${checkbox} (task:${nextId}) [${priority}]`
+  if (args.owner) taskLine += ` [${args.owner}]`
+  taskLine += ` ${title}`
+
+  const insertion = [taskLine]
+  if (args.note) insertion.push(`  - note: ${args.note.replace(/\s+/g, ' ').trim()}`)
+  if (insertIdx > 0 && lines[insertIdx - 1] !== '') insertion.unshift('')
+
+  lines.splice(insertIdx, 0, ...insertion)
+  const updated = lines.join('\n')
+
+  const payload = {
+    id: nextId,
+    project,
+    title,
+    priority,
+    status,
+    owner: args.owner || null,
+    note: args.note || null,
+    file: taskFile,
+    section: sectionByStatus[status],
+    dryRun: args.dryRun,
+  }
+
+  if (args.dryRun) {
+    if (args.json) console.log(JSON.stringify(payload, null, 2))
+    else {
+      console.log(`${c.cyan}[dry-run]${c.reset} would create ${c.bold}${nextId}${c.reset} in ${taskFile}`)
+      console.log(`  section: ${sectionByStatus[status]}`)
+      console.log(`  line: ${taskLine}`)
+      if (args.note) console.log(`  note: ${args.note}`)
+    }
+    return
+  }
+
+  writeFileSync(taskFile, updated, 'utf8')
+  if (args.sync) await cmdSync('files-to-db')
+
+  if (args.json) console.log(JSON.stringify(payload, null, 2))
+  else {
+    console.log(`${c.green}✓${c.reset} Added ${c.bold}${nextId}${c.reset} to ${project} (${sectionByStatus[status]}).`)
+    console.log(`  ${taskFile}`)
+  }
+}
+
 // --- notes -------------------------------------------------------------------
 async function cmdNotes() {
   const notesScript = path.join(SCRIPTS, 'apple-notes-export.mjs')
@@ -568,6 +887,20 @@ ${c.bold}COMMANDS${c.reset}
 
   ${c.cyan}init${c.reset}                      Bootstrap (or re-bootstrap) the SQLite schema. Idempotent.
 
+  ${c.cyan}install-daemon${c.reset}            Install the periodic-sync daemon for your OS.
+                            macOS  → ~/Library/LaunchAgents/com.taskflow.sync.plist (launchctl)
+                            Linux  → ~/.config/systemd/user/taskflow-sync.{service,timer}
+                            Detects platform automatically; templates are in taskflow/system/.
+
+  ${c.cyan}add${c.reset} <project> <title>     Create a task line in markdown (source of truth).
+    ${c.dim}--priority <P0|P1|P2|P3|P9>${c.reset}  Task priority (default: P2)
+    ${c.dim}--owner <tag>${c.reset}           Optional owner/model tag (e.g. codex)
+    ${c.dim}--status <status>${c.reset}       backlog|in_progress|pending_validation|blocked|done
+    ${c.dim}--note <text>${c.reset}           Optional note line under the task
+    ${c.dim}--json${c.reset}                  Emit machine-readable JSON output
+    ${c.dim}--dry-run${c.reset}               Show what would be written without editing files
+    ${c.dim}--sync${c.reset}                  Run files-to-db sync after write
+
   ${c.cyan}notes${c.reset}                     Push current project status to Apple Notes (macOS only).
                             Creates a new note on first run; edits in-place on subsequent
                             runs (preserves any share link). Note ID is saved to
@@ -587,6 +920,8 @@ ${c.bold}EXAMPLES${c.reset}
   taskflow status
   taskflow export > /tmp/projects.json
   taskflow sync check && echo "in sync"
+  taskflow add dashboard "Ship calendar API retry logic" --priority P1 --owner codex
+  taskflow add taskflow "Document parser edge case" --status blocked --note "Waiting on repro"
   taskflow notes
 `)
 }
@@ -613,6 +948,14 @@ switch (cmd) {
 
   case 'init':
     await cmdInit()
+    break
+
+  case 'install-daemon':
+    await cmdInstallDaemon()
+    break
+
+  case 'add':
+    cmdAdd(args)
     break
 
   case 'notes':

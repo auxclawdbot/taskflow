@@ -20,6 +20,59 @@ TaskFlow gives any OpenClaw agent a **structured project/task/plan system** with
 
 ---
 
+## Security
+
+### OPENCLAW_WORKSPACE Trust Boundary
+
+`OPENCLAW_WORKSPACE` is a **high-trust value**. All TaskFlow scripts resolve file paths from it, and the CLI and sync daemon use it to locate the SQLite database, markdown task files, and log directory.
+
+**Rules for safe use:**
+
+1. **Set it only from trusted, controlled sources.** The value must come from:
+   - Your own shell profile (`.zshrc`, `.bashrc`, `/etc/environment`)
+   - The systemd user unit `Environment=` directive in a template you control
+   - The macOS LaunchAgent `EnvironmentVariables` dictionary you installed
+
+   **Never** accept `OPENCLAW_WORKSPACE` from:
+   - User-supplied CLI arguments or HTTP request parameters
+   - Untrusted config files read at runtime
+   - Any external input that has not been explicitly validated
+
+2. **Validate the path exists before use.** Any script that reads `OPENCLAW_WORKSPACE` should confirm the directory exists before proceeding:
+
+   ```js
+   import { existsSync } from 'node:fs'
+   import path from 'node:path'
+
+   const workspace = process.env.OPENCLAW_WORKSPACE
+   if (!workspace) {
+     console.error('OPENCLAW_WORKSPACE is not set. Aborting.')
+     process.exit(1)
+   }
+   if (!existsSync(workspace)) {
+     console.error(`OPENCLAW_WORKSPACE path does not exist: ${workspace}`)
+     process.exit(1)
+   }
+   // Resolve to absolute path to neutralize any relative-path tricks
+   const safeWorkspace = path.resolve(workspace)
+   ```
+
+3. **Do not construct paths from untrusted input.** Even with a valid `OPENCLAW_WORKSPACE`, never concatenate unvalidated user input onto it (e.g. `path.join(workspace, userSlug, '../../../etc/passwd')`). Use `path.resolve()` and check that the resolved path starts with the workspace root:
+
+   ```js
+   function safeJoin(base, ...parts) {
+     const resolved = path.resolve(base, ...parts)
+     if (!resolved.startsWith(path.resolve(base) + path.sep)) {
+       throw new Error(`Path traversal attempt detected: ${resolved}`)
+     }
+     return resolved
+   }
+   ```
+
+4. **Treat `OPENCLAW_WORKSPACE` as a local system path only.** It must point to a directory on the local filesystem. Remote paths (NFS mounts, network shares) may work but are outside the tested configuration and could introduce TOCTOU (time-of-check/time-of-use) race conditions.
+
+---
+
 ## Setup
 
 ### 1. Set environment variable
@@ -31,6 +84,8 @@ export OPENCLAW_WORKSPACE="/path/to/your/.openclaw/workspace"
 ```
 
 All TaskFlow scripts and the CLI resolve paths from this variable. Without it, they fall back to `process.cwd()`, which is almost never what you want.
+
+> **See also:** [OPENCLAW_WORKSPACE Trust Boundary](#openclaw_workspace-trust-boundary) above for security requirements.
 
 ### 2. Link the CLI
 
@@ -99,7 +154,7 @@ The interactive wizard will:
 - Walk you through naming your first project(s)
 - Create `PROJECTS.md` and `tasks/<slug>-tasks.md` from templates
 - Initialize the SQLite database and sync
-- Offer to install the macOS LaunchAgent for automatic 60s sync
+- Offer to install the periodic-sync daemon (LaunchAgent on macOS, systemd timer on Linux) for automatic 60s sync
 
 **Non-interactive (scripted installs):**
 
@@ -107,7 +162,7 @@ The interactive wizard will:
 taskflow setup --name "My Project" --desc "What it does"
 ```
 
-Passing `--name` skips all interactive prompts (LaunchAgent install is also skipped in non-interactive mode).
+Passing `--name` skips all interactive prompts (daemon install is also skipped in non-interactive mode).
 
 ---
 
@@ -129,8 +184,10 @@ Passing `--name` skips all interactive prompts (LaunchAgent install is also skip
     ├── templates/                   # Starter files for new projects
     ├── schema/
     │   └── taskflow.sql             # Full DDL
-    └── launchagents/
-        └── com.taskflow.sync.plist.xml  # Periodic sync (macOS)
+    └── system/
+        ├── com.taskflow.sync.plist.xml  # Periodic sync (macOS LaunchAgent)
+        ├── taskflow-sync.service        # Periodic sync (Linux systemd user unit)
+        └── taskflow-sync.timer          # Systemd timer (60s interval)
 <workspace>/
 └── taskflow.config.json                 # Apple Notes config (auto-created on first notes run)
 ```
@@ -175,11 +232,13 @@ Copy `taskflow/templates/plan-template.md` → `plans/<slug>-plan.md` for archit
 
 ### 4. DB row (auto-created on first sync)
 
-You do **not** need to manually insert into the `projects` table. The sync engine auto-creates the project row from `PROJECTS.md` on the next `files-to-db` run. If you want to be explicit, you can insert:
+You do **not** need to manually insert into the `projects` table. The sync engine auto-creates the project row from `PROJECTS.md` on the next `files-to-db` run. If you want to be explicit via Node.js, use a parameterized statement:
 
-```sql
-INSERT INTO projects (id, name, description, status)
-VALUES ('<slug>', '<Name>', '<description>', 'active');
+```js
+// Safe: parameterized insert — no string interpolation in the SQL
+db.prepare(`INSERT INTO projects (id, name, description, status)
+            VALUES (:id, :name, :description, 'active')`)
+  .run({ id: slug, name: projectName, description: projectDesc })
 ```
 
 ---
@@ -203,6 +262,63 @@ Every task line follows this exact format:
 ### ⚠️ Tag Order Rule
 
 **Priority tag MUST come before owner tag.** The sync parser is positional — it reads the first `[Px]` bracket as priority, and the next `[tag]` as owner. Swapping them will misparse the task.
+
+### ⚠️ Title Sanitization Rules
+
+Task titles must be **plain text only**. Before writing any user-supplied string as a task title, apply the following rules:
+
+1. **Reject lines that look like section headers.** A title may not start with one or more `#` characters followed by a space (e.g. `# My heading`, `## Done`). These would corrupt the sync parser's section detection.
+
+2. **Reject the exact section header strings** even without leading whitespace:
+   - `In Progress`, `Pending Validation`, `Backlog`, `Blocked`, `Done`
+   - Comparison must be case-insensitive.
+
+3. **Escape or strip markdown special characters** that have structural meaning in the task file:
+
+   | Character | Risk | Safe action |
+   |-----------|------|-------------|
+   | `#`       | Looks like a header | Strip or reject |
+   | `- ` (dash + space at line start) | Looks like a list item / task | Strip leading `- ` |
+   | `[ ]` / `[x]` | Looks like a checkbox | Escape brackets: `\[` `\]` |
+   | `]` / `[` alone | Can corrupt `(task:id)` parse | Escape: `\[` `\]` |
+   | Newlines (`\n`, `\r`) | Creates multi-line titles | Strip / reject |
+
+4. **Maximum length.** Titles should be ≤ 200 characters. Truncate or reject longer strings.
+
+**Example sanitization (Node.js):**
+
+```js
+// Safe: sanitize a user-supplied task title before writing to markdown
+function sanitizeTitle(raw) {
+  if (typeof raw !== 'string') throw new TypeError('title must be a string')
+
+  // Strip newlines
+  let title = raw.replace(/[\r\n]+/g, ' ').trim()
+
+  // Reject lines that look like section headers (# Heading or bare header words)
+  if (/^#{1,6}\s/.test(title)) {
+    throw new Error('Title may not start with a markdown heading (#)')
+  }
+  const BANNED_HEADERS = /^(in progress|pending validation|backlog|blocked|done)$/i
+  if (BANNED_HEADERS.test(title)) {
+    throw new Error('Title may not be a reserved section header name')
+  }
+
+  // Escape structural markdown characters
+  title = title
+    .replace(/\[/g, '\\[')
+    .replace(/\]/g, '\\]')
+
+  // Enforce length limit
+  if (title.length > 200) {
+    throw new Error('Title exceeds 200 character limit')
+  }
+
+  return title
+}
+```
+
+These rules apply whenever a task title comes from **any external or user-supplied source** (CLI args, API payloads, file imports). Titles hard-coded by agents in their own sessions are low-risk but should still avoid structural characters.
 
 ✅ Correct: `- [ ] (task:myproject-007) [P1] [codex] Implement search`
 ❌ Wrong:   `- [ ] (task:myproject-007) [codex] [P1] Implement search`
@@ -246,13 +362,21 @@ A note can follow a task line as an indented `- note:` line:
 
 ## Adding a New Task
 
-1. **Determine the next ID.** Scan the task file for the highest existing `<slug>-NNN` and increment by 1. Or query SQLite:
+1. **Determine the next ID.** Scan the task file for the highest existing `<slug>-NNN` and increment by 1. Or query SQLite using a **parameterized statement** (never interpolate the slug into SQL strings):
 
-   ```sql
-   SELECT MAX(CAST(SUBSTR(id, LENGTH('<slug>') + 2) AS INTEGER))
-   FROM tasks_v2
-   WHERE project_id = '<slug>';
+   ```js
+   // Node.js — safe, parameterized
+   const db = new DatabaseSync(dbPath)
+   const row = db
+     .prepare(`SELECT MAX(CAST(SUBSTR(id, LENGTH(:slug) + 2) AS INTEGER)) AS max_seq
+               FROM tasks_v2
+               WHERE project_id = :slug`)
+     .get({ slug: projectSlug })
+   const nextSeq = (row.max_seq ?? 0) + 1
+   const nextId  = `${projectSlug}-${String(nextSeq).padStart(3, '0')}`
    ```
+
+   > ⚠️ **Never construct SQL by string interpolation.** Use `db.prepare()` with named or positional parameters (`?` or `:name`) for all values that come from external input. This applies even for read-only queries.
 
 2. **Append the task line** to the correct section (`## Backlog` for new work, `## In Progress` if starting immediately).
 
@@ -294,38 +418,62 @@ For a quick in-session view, just read the relevant section.
 
 ### Advanced: Query SQLite
 
+> ⚠️ **SQL Safety Rule:** Any query that incorporates a variable value (project slug, task ID, status string, etc.) **must** use parameterized statements — not string interpolation. The `sqlite3` CLI examples below use only **static, hardcoded literal values** and are shown as diagnostic/inspection tools only. For programmatic use, always use the Node.js `db.prepare()` API with bound parameters.
+
+#### sqlite3 CLI (static queries — for manual inspection only)
+
 ```bash
 # All in-progress tasks across all projects (by priority)
-sqlite3 taskflow.db "
-  SELECT id, project_id, priority, title
-  FROM tasks_v2
-  WHERE status = 'in_progress'
-  ORDER BY priority, project_id;
-"
+# Safe: 'in_progress' is a static literal, not a variable
+sqlite3 "$OPENCLAW_WORKSPACE/memory/taskflow.sqlite" \
+  "SELECT id, project_id, priority, title
+   FROM tasks_v2
+   WHERE status = 'in_progress'
+   ORDER BY priority, project_id;"
 
-# Backlog for a specific project
-sqlite3 taskflow.db "
-  SELECT id, priority, title
-  FROM tasks_v2
-  WHERE project_id = '<slug>' AND status = 'backlog'
-  ORDER BY priority;
-"
+# Task count by status per project (no variables — safe for CLI)
+sqlite3 "$OPENCLAW_WORKSPACE/memory/taskflow.sqlite" \
+  "SELECT project_id, status, COUNT(*) AS count
+   FROM tasks_v2
+   GROUP BY project_id, status
+   ORDER BY project_id, status;"
+```
 
-# Task count by status per project
-sqlite3 taskflow.db "
-  SELECT project_id, status, COUNT(*) as count
-  FROM tasks_v2
-  GROUP BY project_id, status
-  ORDER BY project_id, status;
-"
+> Do **not** embed shell variables directly in the SQL string (e.g. `WHERE project_id = '$SLUG'`). That pattern is SQL injection waiting to happen. Use the Node.js API with parameters instead.
 
-# Audit trail for a task
-sqlite3 taskflow.db "
-  SELECT from_status, to_status, actor, at
-  FROM task_transitions_v2
-  WHERE task_id = '<slug>-NNN'
-  ORDER BY at;
-"
+#### Node.js API — parameterized queries (required for programmatic use)
+
+```js
+import { DatabaseSync } from 'node:sqlite'
+import path from 'node:path'
+
+const dbPath = path.join(process.env.OPENCLAW_WORKSPACE, 'memory', 'taskflow.sqlite')
+const db = new DatabaseSync(dbPath)
+db.exec('PRAGMA foreign_keys = ON')
+
+// ── Backlog for a specific project ─────────────────────────────
+// :slug is a named parameter — never interpolated into the SQL string
+const backlog = db
+  .prepare(`SELECT id, priority, title
+            FROM tasks_v2
+            WHERE project_id = :slug AND status = 'backlog'
+            ORDER BY priority`)
+  .all({ slug: 'my-project' })  // value bound at runtime, never in SQL string
+
+// ── Audit trail for a specific task ────────────────────────────
+const transitions = db
+  .prepare(`SELECT from_status, to_status, actor, at
+            FROM task_transitions_v2
+            WHERE task_id = ?
+            ORDER BY at`)
+  .all('my-project-007')  // positional parameter — also safe
+
+// ── Write: update task status ───────────────────────────────────
+// NEVER: db.exec(`UPDATE tasks_v2 SET status='${newStatus}' WHERE id='${id}'`)
+// ALWAYS:
+db.prepare(`UPDATE tasks_v2 SET status = :status, updated_at = datetime('now')
+            WHERE id = :id`)
+  .run({ status: 'done', id: 'my-project-007' })
 ```
 
 ### CLI Quick Reference
@@ -333,6 +481,9 @@ sqlite3 taskflow.db "
 ```bash
 # Terminal summary: all projects + task counts by status
 taskflow status
+
+# Add a task in markdown with automatic next ID
+taskflow add taskflow "Implement quick add command" --priority P1 --owner codex
 
 # JSON export of full project/task state (for dashboards, integrations)
 node taskflow/scripts/export-projects-overview.mjs
@@ -418,17 +569,72 @@ At the start of a session involving a project:
 
 ## Periodic Sync Daemon
 
-The LaunchAgent (macOS) runs `task-sync.mjs files-to-db` every **60 seconds** in the background. This means markdown edits are automatically reflected in SQLite within a minute.
+The sync daemon runs `task-sync.mjs files-to-db` every **60 seconds** in the background. This means markdown edits are automatically reflected in SQLite within a minute.
 
 - Logs: `logs/taskflow-sync.stdout.log` and `logs/taskflow-sync.stderr.log` (relative to workspace)
 - Lock: Advisory TTL lock in `sync_state` table prevents concurrent syncs
 - Conflict resolution: Last-write-wins per sync direction
 
-To install (macOS):
+### Quickest install (auto-detects OS)
 
-1. Copy `taskflow/launchagents/com.taskflow.sync.plist.xml` → `~/Library/LaunchAgents/com.taskflow.sync.plist`
-2. Replace `{{workspace}}` with the absolute path to your workspace
-3. `launchctl load ~/Library/LaunchAgents/com.taskflow.sync.plist`
+```bash
+taskflow install-daemon
+```
+
+This detects your platform and installs the appropriate unit. On macOS it installs and loads the LaunchAgent; on Linux it writes systemd user units and enables the timer.
+
+### macOS — LaunchAgent (manual steps)
+
+Templates: `taskflow/system/com.taskflow.sync.plist.xml`
+
+1. Copy `taskflow/system/com.taskflow.sync.plist.xml` → `~/Library/LaunchAgents/com.taskflow.sync.plist`
+2. Replace `{{workspace}}` with the absolute path to your workspace (no trailing slash)
+3. Replace `{{node}}` with the path to your `node` binary (`which node`)
+4. Load: `launchctl load ~/Library/LaunchAgents/com.taskflow.sync.plist`
+5. Verify: `launchctl list | grep taskflow`
+
+Uninstall:
+```bash
+launchctl unload ~/Library/LaunchAgents/com.taskflow.sync.plist
+rm ~/Library/LaunchAgents/com.taskflow.sync.plist
+```
+
+### Linux — systemd user timer (manual steps)
+
+Templates: `taskflow/system/taskflow-sync.service` and `taskflow/system/taskflow-sync.timer`
+
+```bash
+# Create the user unit directory
+mkdir -p ~/.config/systemd/user
+
+# Copy templates, replacing placeholders
+sed -e "s|{{workspace}}|$OPENCLAW_WORKSPACE|g" \
+    -e "s|{{node}}|$(which node)|g" \
+    taskflow/system/taskflow-sync.service > ~/.config/systemd/user/taskflow-sync.service
+
+sed -e "s|{{workspace}}|$OPENCLAW_WORKSPACE|g" \
+    -e "s|{{node}}|$(which node)|g" \
+    taskflow/system/taskflow-sync.timer  > ~/.config/systemd/user/taskflow-sync.timer
+
+# Enable and start
+systemctl --user daemon-reload
+systemctl --user enable --now taskflow-sync.timer
+```
+
+Verify:
+```bash
+systemctl --user status taskflow-sync.timer
+journalctl --user -u taskflow-sync.service
+```
+
+Uninstall:
+```bash
+systemctl --user disable --now taskflow-sync.timer
+rm ~/.config/systemd/user/taskflow-sync.{service,timer}
+systemctl --user daemon-reload
+```
+
+> **Note:** systemd user units require a login session. To run them without an interactive session (e.g. on a server), enable lingering: `loginctl enable-linger $USER`
 
 ---
 
@@ -464,7 +670,7 @@ Things that work but might trip you up:
 - Notes are one-way (markdown → DB). Removing a note in markdown does not clear it in DB.
 - `db-to-files` rewrites all project task files, even unchanged ones.
 - One task file per project (1:1 mapping). Multiple files per project is post-MVP.
-- Periodic sync daemon: macOS LaunchAgent only. Linux/systemd support is post-MVP (top priority after MVP).
+- Periodic sync daemon: macOS (LaunchAgent) and Linux (systemd user timer) are supported. Run `taskflow install-daemon` to install.
 - Node.js 22.5+ required (`node:sqlite`). No Python fallback in v1.
 
 ---
@@ -473,11 +679,12 @@ Things that work but might trip you up:
 
 ```
 New project:   PROJECTS.md block + tasks/<slug>-tasks.md + optional plans/<slug>-plan.md
-New task:      Append to ## Backlog with next sequential ID, [Priority] before [owner]
+New task:      taskflow add <project> "title" (or append manually to section)
 Update status: Move line to correct ## section, flip checkbox if needed
 Query simple:  cat tasks/<slug>-tasks.md
-Query complex: sqlite3 taskflow.db "SELECT ... FROM tasks_v2 WHERE ..."
+Query complex: Use db.prepare('SELECT ... WHERE id = ?').all(id) — never interpolate variables into SQL
 CLI status:    taskflow status
+CLI add:       taskflow add dashboard "Fix cron panel" --priority P1 --owner codex
 Force sync:    node taskflow/scripts/task-sync.mjs files-to-db
 Memory rule:   Reference IDs in logs; never copy backlog into memory
 ```

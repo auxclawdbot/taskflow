@@ -1,0 +1,28 @@
+[Unit]
+Description=TaskFlow Periodic Sync — markdown → SQLite
+Documentation=file://{{workspace}}/taskflow/SKILL.md
+# Only start when the timer triggers; not at boot on its own.
+After=default.target
+
+[Service]
+Type=oneshot
+
+# Workspace directory (resolved by the script from env var)
+WorkingDirectory={{workspace}}
+
+# Environment: pass the workspace path explicitly
+Environment=OPENCLAW_WORKSPACE={{workspace}}
+
+# Command to run
+ExecStart={{node}} {{workspace}}/taskflow/scripts/task-sync.mjs files-to-db
+
+# Log stdout/stderr to the systemd journal (use journalctl --user -u taskflow-sync to view)
+StandardOutput=append:{{workspace}}/logs/taskflow-sync.stdout.log
+StandardError=append:{{workspace}}/logs/taskflow-sync.stderr.log
+
+# Do not restart on failure — the timer will retry on the next interval
+Restart=no
+
+[Install]
+# Not normally enabled directly; managed via the .timer unit
+WantedBy=default.target
