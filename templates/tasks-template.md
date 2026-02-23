@@ -43,6 +43,9 @@
     ❌  - [ ] (task:myproject-007) [codex] [P1] Implement search
   ============================================================ -->
 
+## Last Session
+<!-- Auto-written by agent on project exit. See SKILL.md "Session Context" section. -->
+
 ## In Progress
 
 ## Pending Validation

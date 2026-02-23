@@ -214,10 +214,13 @@ Follow this full checklist when creating a new project:
 
 Copy `taskflow/templates/tasks-template.md` → `tasks/<slug>-tasks.md` and update the project name in the heading.
 
-The file **must** contain these five section headers in this order:
+The file **must** contain these section headers in this order:
 
 ```markdown
 # <Project Name> — Tasks
+
+## Last Session
+(auto-written by agent — see Session Context below)
 
 ## In Progress
 ## Pending Validation
@@ -677,6 +680,33 @@ Things that work but might trip you up:
 - One task file per project (1:1 mapping). Multiple files per project is post-MVP.
 - Periodic sync daemon: macOS (LaunchAgent) and Linux (systemd user timer) are supported. Run `taskflow install-daemon` to install.
 - Node.js 22.5+ required (`node:sqlite`). No Python fallback in v1.
+
+---
+
+## Session Context ("Stash")
+
+When agents switch between projects, write a `## Last Session` block at the top of the task file (below the `# heading`, above `## In Progress`). This captures working context so any future session can resume instantly.
+
+### Format
+```markdown
+## Last Session
+> **Date:** 2026-02-22 | **Status:** Stashed
+> **Resume:** [one-line "start here" instruction]
+> **Context:** [2-3 lines of what was happening, decisions made]
+> **Blockers:** [blockers, or "None"]
+```
+
+### Rules
+- **Write on project exit** — when the user switches to a different project or the session ends
+- **Overwrite each time** — only the most recent session matters
+- **Lazy loaded** — agents only read this when the project is accessed, zero cost otherwise
+- **Lives in the task file** — not in MEMORY.md (loaded every session = token waste) or separate files
+- **DB sync ignores it** — it's a markdown convention, not a parsed section
+
+### Token economics
+- Cost: ~150 tokens when read (only on project access)
+- Saves: ~2-5K tokens of context recovery messages
+- Net: 10-20x token-positive
 
 ---
 
