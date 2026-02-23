@@ -214,10 +214,13 @@ Follow this full checklist when creating a new project:
 
 Copy `taskflow/templates/tasks-template.md` → `tasks/<slug>-tasks.md` and update the project name in the heading.
 
-The file **must** contain these five section headers in this order:
+The file **must** contain these section headers in this order:
 
 ```markdown
 # <Project Name> — Tasks
+
+## Last Session
+(auto-written by agent — see Session Context below)
 
 ## In Progress
 ## Pending Validation
@@ -677,6 +680,48 @@ Things that work but might trip you up:
 - One task file per project (1:1 mapping). Multiple files per project is post-MVP.
 - Periodic sync daemon: macOS (LaunchAgent) and Linux (systemd user timer) are supported. Run `taskflow install-daemon` to install.
 - Node.js 22.5+ required (`node:sqlite`). No Python fallback in v1.
+
+---
+
+## Session Context ("Stash")
+
+When agents switch between projects, write a `## Last Session` block at the top of the task file (below the `# heading`, above `## In Progress`). This captures working context so any future session can resume instantly.
+
+### Format
+```markdown
+## Last Session
+> **Date:** 2026-02-22 | **Status:** In Progress
+> **Resume:** [one-line "start here" instruction]
+> **Context:** [2-3 lines of what was happening, decisions made]
+> **Blockers:** [blockers, or "None"]
+
+<details>
+<summary>Previous (2026-02-21)</summary>
+
+> **Resume:** [what you were picking up from]
+> **Context:** [what happened that session]
+> **Blockers:** [blockers at the time]
+
+</details>
+```
+
+### Status values
+- **In Progress** — actively being worked on, not finished yet
+- **Stashed** — paused, switching to another project
+- **Done** — wrapped up, stash can be pruned next session
+
+### Rules
+- **Write on project exit** — when the user switches to a different project or the session ends
+- **Rolling history** — keep the last 2-3 sessions; latest is visible, older ones go in `<details>` (collapsed)
+- **Auto-prune** — drop sessions older than 3 entries, unless status is "Stashed" (preserve until resumed)
+- **Lazy loaded** — agents only read this when the project is accessed, zero cost otherwise
+- **Lives in the task file** — not in MEMORY.md (loaded every session = token waste) or separate files
+- **DB sync ignores it** — it's a markdown convention, not a parsed section
+
+### Token economics
+- Cost: ~150-300 tokens when read (only on project access, varies with history depth)
+- Saves: ~2-5K tokens of context recovery messages
+- Net: 10-20x token-positive
 
 ---
 
