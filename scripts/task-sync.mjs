@@ -239,7 +239,14 @@ function syncFilesToDb(fileTasks, dbTasks, diffs) {
       owner_model = excluded.owner_model,
       notes       = COALESCE(excluded.notes, tasks_v2.notes),
       source_file = excluded.source_file,
-      updated_at  = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+      updated_at  = CASE
+        WHEN tasks_v2.title != excluded.title
+          OR tasks_v2.status != excluded.status
+          OR tasks_v2.priority != excluded.priority
+          OR COALESCE(tasks_v2.owner_model,'') != COALESCE(excluded.owner_model,'')
+        THEN strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        ELSE tasks_v2.updated_at
+      END
   `)
   const insertTransition = db.prepare(`
     INSERT INTO task_transitions_v2 (task_id, from_status, to_status, reason, actor)
