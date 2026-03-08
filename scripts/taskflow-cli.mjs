@@ -11,6 +11,7 @@
  *   taskflow install-daemon      Install periodic-sync daemon (LaunchAgent on macOS, systemd on Linux)
  *   taskflow add <project> <title> Create a new task in markdown (source of truth)
  *   taskflow list <project>      List tasks for a project (current tasks by default)
+ *   taskflow validate <task-id>  Approve or reject a task in pending_validation
  *   taskflow help                Show this help
  */
 
@@ -1063,6 +1064,247 @@ function cmdList(rawArgs) {
   console.log()
 }
 
+// --- validate ----------------------------------------------------------------
+function parseValidateArgs(rawArgs) {
+  const out = {
+    taskId: null,
+    approve: false,
+    reject: false,
+    feedback: null,
+    json: false,
+    dryRun: false,
+    sync: false,
+  }
+
+  const rest = [...rawArgs]
+  if (!rest.length) return out
+
+  if (rest[0] && !rest[0].startsWith('--')) {
+    out.taskId = (rest.shift() || '').trim() || null
+  }
+
+  while (rest.length) {
+    const tok = rest.shift()
+    if (tok === '--approve') out.approve = true
+    else if (tok === '--reject') out.reject = true
+    else if (tok === '--feedback') out.feedback = (rest.shift() || '').trim()
+    else if (tok === '--json') out.json = true
+    else if (tok === '--dry-run') out.dryRun = true
+    else if (tok === '--sync') out.sync = true
+    else {
+      console.error(`${c.red}✗${c.reset} Unknown flag for validate: ${tok}`)
+      process.exit(1)
+    }
+  }
+
+  return out
+}
+
+function cmdValidate(rawArgs) {
+  const args = parseValidateArgs(rawArgs)
+  const sectionByStatus = {
+    in_progress: 'In Progress',
+    pending_validation: 'Pending Validation',
+    backlog: 'Backlog',
+    blocked: 'Blocked',
+    done: 'Done',
+  }
+
+  if (!args.taskId) {
+    console.error(`${c.red}✗${c.reset} Usage: taskflow validate <task-id> --approve|--reject [--feedback "reason"] [--json] [--dry-run] [--sync]`)
+    process.exit(1)
+  }
+
+  if (!args.approve && !args.reject) {
+    console.error(`${c.red}✗${c.reset} Must specify --approve or --reject`)
+    process.exit(1)
+  }
+
+  if (args.approve && args.reject) {
+    console.error(`${c.red}✗${c.reset} Cannot use both --approve and --reject`)
+    process.exit(1)
+  }
+
+  if (args.reject && !args.feedback) {
+    console.error(`${c.red}✗${c.reset} --reject requires --feedback "reason"`)
+    process.exit(1)
+  }
+
+  if (!existsSync(dbPath)) {
+    console.error(`${c.red}✗${c.reset} DB not found at: ${dbPath}`)
+    process.exit(1)
+  }
+
+  const db = new DatabaseSync(dbPath)
+  db.exec('PRAGMA foreign_keys = ON')
+
+  // Resolve task ID (exact match or fuzzy)
+  const taskIdLower = args.taskId.toLowerCase()
+  let task = db.prepare('SELECT id, project_id, title, status, priority, owner_model, notes, source_file FROM tasks_v2 WHERE id = ?').get(taskIdLower)
+
+  if (!task) {
+    // Try fuzzy: find tasks whose ID contains the input
+    const candidates = db.prepare(
+      "SELECT id, project_id, title, status FROM tasks_v2 WHERE id LIKE '%' || ? || '%'"
+    ).all(taskIdLower)
+
+    if (candidates.length === 1) {
+      task = db.prepare('SELECT id, project_id, title, status, priority, owner_model, notes, source_file FROM tasks_v2 WHERE id = ?').get(candidates[0].id)
+    } else if (candidates.length > 1) {
+      console.error(`${c.red}✗${c.reset} Ambiguous task ID '${args.taskId}'. Matches:`)
+      for (const cand of candidates.slice(0, 10)) {
+        console.error(`  ${cand.id} (${cand.status}) ${cand.title}`)
+      }
+      process.exit(1)
+    } else {
+      console.error(`${c.red}✗${c.reset} Task '${args.taskId}' not found.`)
+      process.exit(1)
+    }
+  }
+
+  if (task.status !== 'pending_validation') {
+    console.error(`${c.red}✗${c.reset} Task ${task.id} is '${task.status}', not 'pending_validation'.`)
+    console.error(`  Only tasks in pending_validation can be validated.`)
+    process.exit(1)
+  }
+
+  const newStatus = args.approve ? 'done' : 'in_progress'
+  const reviewStatus = args.approve ? 'confirmed' : 'rejected'
+  const at = new Date().toISOString()
+
+  const payload = {
+    taskId: task.id,
+    project: task.project_id,
+    title: task.title,
+    action: args.approve ? 'approve' : 'reject',
+    fromStatus: 'pending_validation',
+    toStatus: newStatus,
+    feedback: args.feedback || null,
+    dryRun: args.dryRun,
+  }
+
+  if (args.dryRun) {
+    if (args.json) console.log(JSON.stringify(payload, null, 2))
+    else {
+      console.log(`${c.cyan}[dry-run]${c.reset} Would ${args.approve ? 'approve' : 'reject'} ${c.bold}${task.id}${c.reset}`)
+      console.log(`  title: ${task.title}`)
+      console.log(`  status: pending_validation → ${newStatus}`)
+      if (args.feedback) console.log(`  feedback: ${args.feedback}`)
+    }
+    return
+  }
+
+  // 1. Update tasks_v2 status + notes
+  let updatedNotes = task.notes || ''
+  if (args.feedback) {
+    const feedbackLine = `Validation feedback: ${args.feedback}`
+    updatedNotes = updatedNotes ? `${updatedNotes}\n${feedbackLine}` : feedbackLine
+  }
+
+  db.prepare(`
+    UPDATE tasks_v2
+    SET status = ?, notes = ?, updated_at = ?
+    WHERE id = ?
+  `).run(newStatus, updatedNotes || null, at, task.id)
+
+  // 2. Write validation_reviews
+  db.prepare(`
+    INSERT INTO validation_reviews (key, status, feedback, at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(key) DO UPDATE SET
+      status = excluded.status,
+      feedback = excluded.feedback,
+      at = excluded.at
+  `).run(`pv:${task.id}`, reviewStatus, args.feedback || null, at)
+
+  // 3. Write task_transitions_v2
+  db.prepare(`
+    INSERT INTO task_transitions_v2 (task_id, from_status, to_status, reason, actor, at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(task.id, 'pending_validation', newStatus, args.feedback || (args.approve ? 'Approved via CLI' : 'Rejected via CLI'), 'taskflow-cli', at)
+
+  // 4. Update markdown source file
+  const taskFile = task.source_file.startsWith('/')
+    ? task.source_file
+    : path.join(workspace, task.source_file)
+
+  if (existsSync(taskFile)) {
+    const original = readFileSync(taskFile, 'utf8')
+    const lines = original.split(/\n/)
+
+    // Find the task line
+    const taskPattern = new RegExp(`\\(task:${escapeRegex(task.id)}\\)`)
+    const taskIdx = lines.findIndex(l => taskPattern.test(l))
+
+    if (taskIdx >= 0) {
+      // Collect the task line + any indented note lines below it
+      const taskLines = [lines[taskIdx]]
+      let endIdx = taskIdx + 1
+      while (endIdx < lines.length && /^\s{2,}-\s/.test(lines[endIdx])) {
+        taskLines.push(lines[endIdx])
+        endIdx++
+      }
+
+      // Update checkbox on the task line
+      if (args.approve) {
+        taskLines[0] = taskLines[0].replace(/- \[ \]/, '- [x]')
+      } else {
+        taskLines[0] = taskLines[0].replace(/- \[x\]/i, '- [ ]')
+      }
+
+      // Add feedback as a note line if rejecting
+      if (args.feedback) {
+        taskLines.push(`  - note: Validation feedback: ${args.feedback}`)
+      }
+
+      // Remove original lines
+      lines.splice(taskIdx, endIdx - taskIdx)
+
+      // Find target section and insert
+      const targetSection = `## ${sectionByStatus[newStatus]}`
+      const secIdx = lines.findIndex(l => l.trim() === targetSection)
+      if (secIdx >= 0) {
+        // Find insertion point: after section header, before next section
+        let insertIdx = lines.length
+        for (let i = secIdx + 1; i < lines.length; i++) {
+          if (/^##\s+/.test(lines[i])) {
+            insertIdx = i
+            break
+          }
+        }
+        // Add blank line before if needed
+        if (insertIdx > 0 && lines[insertIdx - 1] !== '' && lines[insertIdx - 1] !== targetSection) {
+          taskLines.unshift('')
+        }
+        lines.splice(insertIdx, 0, ...taskLines)
+      } else {
+        // Fallback: just put it back where it was (shouldn't happen with standard headers)
+        lines.splice(taskIdx, 0, ...taskLines)
+        console.error(`${c.yellow}⚠${c.reset} Could not find section '${targetSection}' in ${taskFile} — task line updated in place.`)
+      }
+
+      writeFileSync(taskFile, lines.join('\n'), 'utf8')
+    } else {
+      console.error(`${c.yellow}⚠${c.reset} Could not find task ${task.id} in ${taskFile} — DB updated but markdown not modified.`)
+    }
+  } else {
+    console.error(`${c.yellow}⚠${c.reset} Task file not found: ${taskFile} — DB updated but markdown not modified.`)
+  }
+
+  // 5. Optional sync
+  if (args.sync) cmdSync('files-to-db')
+
+  if (args.json) {
+    console.log(JSON.stringify({ ...payload, at, reviewKey: `pv:${task.id}` }, null, 2))
+  } else {
+    const icon = args.approve ? `${c.green}✓${c.reset}` : `${c.yellow}↩${c.reset}`
+    const verb = args.approve ? 'Approved' : 'Rejected'
+    console.log(`${icon} ${verb} ${c.bold}${task.id}${c.reset} — ${task.title}`)
+    console.log(`  ${c.dim}pending_validation → ${newStatus}${c.reset}`)
+    if (args.feedback) console.log(`  ${c.dim}feedback: ${args.feedback}${c.reset}`)
+  }
+}
+
 // --- notes -------------------------------------------------------------------
 async function cmdNotes() {
   const notesScript = path.join(SCRIPTS, 'apple-notes-export.mjs')
@@ -1126,6 +1368,16 @@ ${c.bold}COMMANDS${c.reset}
     ${c.dim}--json${c.reset}                  Emit machine-readable JSON output
     ${c.dim}--limit <n>${c.reset}             Limit total tasks returned after sorting
 
+  ${c.cyan}validate${c.reset} <task-id>        Approve or reject a task in pending_validation.
+                            Updates DB (tasks_v2, validation_reviews, task_transitions_v2)
+                            and moves the task line in the markdown source file.
+    ${c.dim}--approve${c.reset}               Mark task as done (pending_validation → done)
+    ${c.dim}--reject${c.reset}                Send task back (pending_validation → in_progress)
+    ${c.dim}--feedback "reason"${c.reset}     Required for --reject, optional for --approve
+    ${c.dim}--json${c.reset}                  Emit machine-readable JSON output
+    ${c.dim}--dry-run${c.reset}               Show what would change without writing
+    ${c.dim}--sync${c.reset}                  Run files-to-db sync after write
+
   ${c.cyan}notes${c.reset}                     Push current project status to Apple Notes (macOS only).
                             Creates a new note on first run; edits in-place on subsequent
                             runs (preserves any share link). Note ID is saved to
@@ -1150,6 +1402,9 @@ ${c.bold}EXAMPLES${c.reset}
   taskflow list taskflow
   taskflow list --project "TaskFlow" --all
   taskflow list task --status backlog,pending_validation --json
+  taskflow validate taskflow-041 --approve
+  taskflow validate dashboard-050 --reject --feedback "Missing error handling for network failures"
+  taskflow validate trading-003 --approve --json --dry-run
   taskflow notes
 `)
 }
@@ -1188,6 +1443,10 @@ switch (cmd) {
 
   case 'list':
     cmdList(args)
+    break
+
+  case 'validate':
+    cmdValidate(args)
     break
 
   case 'notes':

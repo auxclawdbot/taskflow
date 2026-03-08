@@ -101,3 +101,14 @@ CREATE TABLE IF NOT EXISTS legacy_key_map (
 
 CREATE INDEX IF NOT EXISTS idx_legacy_key_map_new_id
   ON legacy_key_map (new_id);
+
+-- ---------------------------------------------------------------------------
+-- validation_reviews  (task validation outcomes — owned by taskflow)
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS validation_reviews (
+  key      TEXT PRIMARY KEY,                          -- pv:<item-label>
+  status   TEXT NOT NULL
+             CHECK (status IN ('confirmed', 'rejected')),
+  feedback TEXT,
+  at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);

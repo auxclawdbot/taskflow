@@ -1,0 +1,65 @@
+
+taskflow — TaskFlow CLI
+
+USAGE
+  taskflow <command> [options]
+
+COMMANDS
+  setup                     Interactive first-run onboarding. Creates workspace
+                            directories, PROJECTS.md, task files, initializes the
+                            DB, syncs, and optionally installs the LaunchAgent.
+    --name <name>           Non-interactive: project name (skips all prompts)
+    --desc <desc>           Non-interactive: project description
+    --no-launchagent        Skip LaunchAgent / cron prompt
+    --yes, -y              Auto-accept all yes/no prompts
+
+  status                    Pretty terminal summary of all projects with task counts
+                            and progress bars.
+
+  export                    Output a full JSON snapshot of all projects and tasks to
+                            stdout. Pipe to a file for dashboard consumption.
+
+  sync <mode>               Sync task markdown files ↔ SQLite.
+    files-to-db             Parse markdown, write to DB (markdown is authoritative)
+    db-to-files             Regenerate markdown from DB state
+    check                   Detect drift, exit 1 if mismatch (good for CI/cron)
+
+  init                      Bootstrap (or re-bootstrap) the SQLite schema. Idempotent.
+
+  install-daemon            Install the periodic-sync daemon for your OS.
+                            macOS  → ~/Library/LaunchAgents/com.taskflow.sync.plist (launchctl)
+                            Linux  → ~/.config/systemd/user/taskflow-sync.{service,timer}
+                            Detects platform automatically; templates are in taskflow/system/.
+
+  add <project> <title>     Create a task line in markdown (source of truth).
+    --priority <P0|P1|P2|P3|P9>  Task priority (default: P2)
+    --owner <tag>           Optional owner/model tag (e.g. codex)
+    --status <status>       backlog|in_progress|pending_validation|blocked|done
+    --note <text>           Optional note line under the task
+    --json                  Emit machine-readable JSON output
+    --dry-run               Show what would be written without editing files
+    --sync                  Run files-to-db sync after write
+
+  notes                     Push current project status to Apple Notes (macOS only).
+                            Creates a new note on first run; edits in-place on subsequent
+                            runs (preserves any share link). Note ID is saved to
+                            $OPENCLAW_WORKSPACE/taskflow.config.json.
+
+  help                      Show this message.
+
+ENVIRONMENT
+  OPENCLAW_WORKSPACE        Root workspace directory (default: cwd)
+                            DB is resolved as $OPENCLAW_WORKSPACE/memory/taskflow.sqlite
+
+EXAMPLES
+  taskflow setup
+  taskflow setup --name "My Project" --desc "A cool thing" --no-launchagent
+  taskflow init
+  taskflow sync files-to-db
+  taskflow status
+  taskflow export > /tmp/projects.json
+  taskflow sync check && echo "in sync"
+  taskflow add dashboard "Ship calendar API retry logic" --priority P1 --owner codex
+  taskflow add taskflow "Document parser edge case" --status blocked --note "Waiting on repro"
+  taskflow notes
+

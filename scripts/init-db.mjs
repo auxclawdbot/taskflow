@@ -158,6 +158,7 @@ const EXPECTED_TABLES = [
   'task_transitions_v2',
   'sync_state',
   'legacy_key_map',
+  'validation_reviews',
 ];
 
 console.log('');

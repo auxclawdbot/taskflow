@@ -407,6 +407,22 @@ The periodic sync (60s) will pick up the change and update SQLite automatically.
 node taskflow/scripts/task-sync.mjs files-to-db
 ```
 
+### Validation (approve / reject)
+
+For tasks in `pending_validation`, use the CLI to approve or reject:
+
+```bash
+# Approve: moves task to Done, toggles checkbox, writes validation_reviews + transition log
+taskflow validate <task-id> --approve
+
+# Reject: moves task to In Progress, appends feedback as note
+taskflow validate <task-id> --reject --feedback "reason"
+```
+
+This updates the DB (tasks_v2 status, validation_reviews, task_transitions_v2) and the markdown file atomically. The dashboard's decision-store also uses this path for UI-based validation.
+
+Flags: `--json` for machine output, `--dry-run` to preview, `--sync` to force files-to-db after.
+
 ---
 
 ## Querying Tasks
@@ -492,6 +508,11 @@ taskflow add taskflow "Implement quick add command" --priority P1 --owner codex
 taskflow list taskflow
 taskflow list --project "TaskFlow" --all
 taskflow list task --status backlog,pending_validation --json
+
+# Validate a task (approve or reject from pending_validation)
+taskflow validate taskflow-041 --approve
+taskflow validate dashboard-050 --reject --feedback "Missing error handling"
+taskflow validate trading-003 --approve --json --dry-run
 
 # JSON export of full project/task state (for dashboards, integrations)
 node taskflow/scripts/export-projects-overview.mjs
